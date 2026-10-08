@@ -36,3 +36,4 @@ MODEM_log_*
 ***/configure~
 .DS_Store
 janus_executable/janus_executable
+tests/build/
