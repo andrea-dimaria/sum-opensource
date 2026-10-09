@@ -12,6 +12,7 @@ These tests check the JANUS changes (class 11 and class 0 plugins, ADB fields, R
 | `janus_mac_test.cpp` | `JanusMac` unit test (ANEP-87 §2.2 CSMA/GA and backoff), synthetic channel |
 | `janus_loopback_test.cpp` | `JanusWrapper` end to end, using an ideal channel: the samples one wrapper modulates are demodulated by another |
 | `run_tests.sh` | Builds libjanus and the plugins into `tests/build/`, then builds and runs all the tests |
+| `channel_scan.cpp` | Tool, not a test (built by `run_tests.sh`): channel scan of a recording, see below |
 
 ## What is checked
 
@@ -67,6 +68,22 @@ tests/run_tests.sh ../janus-c --fs 192000 --long
 ```
 
 `run_tests.sh` prints `ALL TESTS PASSED` and returns 0, or lists the `FAIL` lines and returns non-zero. libjanus's packet dumps go to `tests/build/loopback_stderr.log`.
+
+## Channel scan of a recording
+
+`tests/build/channel_scan` gives a WAV (e.g. from `knowledge/modem_kit/modem_record.sh`) to a `JanusWrapper` receiver, as the sound card would, and reports:
+- busy time and busy intervals, split into energy only (the libjanus GA detector) and with a preamble detection: on a noise-only recording every interval is a false alarm;
+- decoded packets;
+- a replay of the MAC on the recording: one packet requested every `--request-every` seconds (default 10), with the delay before transmitting and the drops.
+
+```bash
+LD_LIBRARY_PATH=tests/build/janus-install/share/janus/plugins \
+  tests/build/channel_scan rec/noise.wav [--center-freq 11520 --bandwidth 4160] [--csv events.csv]
+```
+- **Speed:** the WAV is fed 4× faster than real time (`--speed`); lower it if packets are missed.
+- **CSV:** `--csv` writes every channel event (time, busy, detected, window and background power) for plots.
+- **Expect at start-up:** about 0.1 s of "energy" busy while the first 16-chip window fills.
+- **Known behaviour:** the libjanus detector holds the window power with a slow decay, so the channel stays busy for a while after a strong packet (3.7 s after a 2 s packet on a synthetic, very high SNR test).
 
 ## Limitations
 - **The channel is ideal:** no multipath, Doppler or collisions (only the channel events test adds white noise).

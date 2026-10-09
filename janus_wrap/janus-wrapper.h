@@ -53,6 +53,8 @@ public:
     double time; /**< time up to which the channel was sensed */
     /** busy window (ANEP-87 §2.2.1), preamble detected or packet received */
     bool busy;
+    /** preamble detected (packet being decoded) or packet received */
+    bool detected;
     double window_power; /**< libjanus carrier sensing window power */
     double background_power; /**< libjanus carrier sensing background power */
     /** reservation or scheduled repeat received, valid if reserved_to > reserved_from */

@@ -58,6 +58,9 @@ g++ $CXXFLAGS "$TESTS/janus_mac_test.cpp" "$SUM/janus_wrap/janus-mac.cpp" \
   -o "$BUILD/janus_mac_test"
 g++ $CXXFLAGS "$TESTS/janus_loopback_test.cpp" "$SUM/janus_wrap/janus-wrapper.cpp" \
   "$SUM/modem_utils/chunk.cpp" $LIBS -o "$BUILD/janus_loopback_test"
+# tool, not a test: channel scan of a recording (see channel_scan.cpp)
+g++ $CXXFLAGS "$TESTS/channel_scan.cpp" "$SUM/janus_wrap/janus-wrapper.cpp" \
+  "$SUM/janus_wrap/janus-mac.cpp" "$SUM/modem_utils/chunk.cpp" $LIBS -o "$BUILD/channel_scan"
 
 # a failing test stops the script (set -e), also through tail
 set -o pipefail

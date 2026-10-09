@@ -647,7 +647,7 @@ JanusWrapper::notifyPacket(janus_packet_t packet, double time)
   if(!channel_listener) {
     return;
   }
-  ChannelEvent ev = {time, true, 0, 0, 0, 0};
+  ChannelEvent ev = {time, true, true, 0, 0, 0, 0};
   janus_uint8_t flag = 2;
   double interval = janus_packet_get_validity(packet)
     ? janus_packet_get_tx_interval(packet, &flag) : 0.0;
@@ -843,7 +843,7 @@ void JanusWrapper::performDemodulation()
       int cs = janus_carrier_sensing_execute(carrier_sensing, &time);
       double cs_time = janus_carrier_sensing_time(carrier_sensing);
       if(channel_listener && (detected || cs != 0 || cs_time != last_cs_time)) {
-        ChannelEvent ev = {rx_time, detected || cs != 0,
+        ChannelEvent ev = {rx_time, detected || cs != 0, detected,
           janus_carrier_sensing_window_power(carrier_sensing),
           janus_carrier_sensing_background_power(carrier_sensing), 0, 0};
         channel_listener(ev);
