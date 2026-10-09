@@ -270,10 +270,16 @@ AlsaStream::receive(int num_rec_symbols)
 		return nullptr;
 	}
 	if((rv = snd_pcm_readi(handle_rx, samples->samples.data(), samples->samples.size())) <= 0) {
+		if(rv == -EPIPE) {
+			std::cerr << "ALSA RX overrun" << std::endl;
+		}
 		snd_pcm_prepare(handle_rx);
 		rv = snd_pcm_readi(handle_rx, samples->samples.data(), samples->samples.size());
-		samples->sample_size = rv;
-		return samples;
+		if(rv <= 0) {
+			// sample_size is unsigned: a negative error code would make the
+			// demodulator copy megabytes of garbage into the JANUS fifo
+			return nullptr;
+		}
 	}
 	samples->sample_size = rv;
 	return samples;
