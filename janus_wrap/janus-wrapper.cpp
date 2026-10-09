@@ -141,7 +141,10 @@ JanusWrapper::initDefaultParams()
   params->doppler_correction = 1;
   params->doppler_max_speed = JANUS_REAL_CONST(5.0);
   params->compute_channel_spectrogram = 1;
-  params->detection_threshold = JANUS_REAL_CONST(2.5);
+  // libjanus uses 2.5; on the modems that gave a false preamble detection
+  // every ~30 s on sea noise alone, each one making the receiver deaf for a
+  // packet length, so back-to-back packets were lost. 3.0 removed them.
+  params->detection_threshold = JANUS_REAL_CONST(3.0);
   params->colored_bit_prob = 0;
   params->cbp_high2medium  = JANUS_REAL_CONST(0.2);
   params->cbp_medium2low   = JANUS_REAL_CONST(0.35);
@@ -421,6 +424,16 @@ void
 JanusWrapper::setRxMetadata(bool enable)
 {
   rx_metadata = enable;
+}
+
+bool
+JanusWrapper::setDetectionThreshold(double threshold)
+{
+  if(threshold <= 0) {
+    return false;
+  }
+  params->detection_threshold = threshold;
+  return true;
 }
 
 void

@@ -220,6 +220,15 @@ public:
   void setRxMetadata(bool enable);
 
   /**
+  * Function used to set the GO-CFAR preamble detection threshold (receiver
+  * choice, not fixed by ANEP-87). Call before janusSetup().
+  *
+  * @param threshold detection threshold, > 0.
+  * @return bool false if out of range.
+  */
+  bool setDetectionThreshold(double threshold);
+
+  /**
   * Function used to create all the required janus objects.
   *
   * @return bool false if setup fails, e.g. no plugin for (class ID, app type).

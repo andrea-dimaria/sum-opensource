@@ -135,6 +135,8 @@ void printHelp() {
   std::cout << "  --rx-metadata 0|1    prefix each received payload with 7 bytes (default: 0):" << std::endl;
   std::cout << "                       station_id u8 | dest_id u8 | pset_id u16 BE | class_id u8 | app_type u8 |" << std::endl;
   std::cout << "                       flags u8 (bit0 mobility, bit1 tx_rx, bit2 forward)" << std::endl;
+  std::cout << "  --detection-threshold X  preamble detection threshold (default: 3.0, libjanus: 2.5);" << std::endl;
+  std::cout << "                       higher gives fewer false detections, lower more range" << std::endl;
   std::cout << "  --help               print this help" << std::endl;
   std::cout << "Text messages (class 11, app type 2 Generic Text Chat, needs libplugin_011_02.so):" << std::endl;
   std::cout << "  text only (no 0x00 bytes), at most 478 bytes, station ID [0;254], MAC header not allowed" << std::endl;
@@ -174,6 +176,7 @@ struct Config {
   int rx_class_filter = -1;
   int rx_app_filter = -1;
   int rx_metadata = 0;
+  double detection_threshold = 3.0;
   bool self_filter = false; /**< drop own packets, on with MAC or explicit station ID */
 };
 
@@ -221,6 +224,7 @@ int parseArgs(int argc, char* argv[], Config& cfg)
       {"rx-class-filter", required_argument, nullptr, 'x'},
       {"rx-app-filter", required_argument, nullptr, 'y'},
       {"rx-metadata", required_argument, nullptr, 'z'},
+      {"detection-threshold", required_argument, nullptr, 'T'},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0}
     };
@@ -248,6 +252,7 @@ int parseArgs(int argc, char* argv[], Config& cfg)
         case 'x': cfg.rx_class_filter = atoi(optarg); break;
         case 'y': cfg.rx_app_filter = atoi(optarg); break;
         case 'z': cfg.rx_metadata = atoi(optarg); break;
+        case 'T': cfg.detection_threshold = atof(optarg); break;
         case 'h': return 1;
         default: return -1;
       }
@@ -373,6 +378,7 @@ int main(int argc, char* argv[])
     << " rx_class_filter = " << cfg.rx_class_filter
     << " rx_app_filter = " << cfg.rx_app_filter
     << " rx_metadata = " << cfg.rx_metadata
+    << " detection_threshold = " << cfg.detection_threshold
     << std::endl;
 
   /**
@@ -382,7 +388,8 @@ int main(int argc, char* argv[])
     || !janus.setForward(cfg.forward) || !janus.setClassId(cfg.class_id)
     || !janus.setAppType(cfg.app_type) || !janus.setStationId(cfg.station_id)
     || !janus.setAdbPsetId(cfg.pset_id) || !janus.setDestId(cfg.dest_id)
-    || !janus.setRxFilter(cfg.rx_class_filter, cfg.rx_app_filter)) {
+    || !janus.setRxFilter(cfg.rx_class_filter, cfg.rx_app_filter)
+    || !janus.setDetectionThreshold(cfg.detection_threshold)) {
     std::cerr << "ERROR: JANUS packet field out of range" << std::endl;
     printHelp();
     return -1;
