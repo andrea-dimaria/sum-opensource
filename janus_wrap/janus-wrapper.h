@@ -33,6 +33,7 @@
 #include <chunk.h>
 #include <mutex>
 #include <condition_variable>
+#include <functional>
 #include <janus/janus.h>
 #include <janus/defaults.h>
 
@@ -42,6 +43,25 @@
 class JanusWrapper 
 {
 public:
+
+  /**
+  * Channel state for the MAC, sent from the demodulation thread.
+  * Times are receiver times in seconds: samples given to demodulate() / fs,
+  * so the samples not given (half duplex) do not count.
+  */
+  struct ChannelEvent {
+    double time; /**< time up to which the channel was sensed */
+    /** busy window (ANEP-87 §2.2.1), preamble detected or packet received */
+    bool busy;
+    double window_power; /**< libjanus carrier sensing window power */
+    double background_power; /**< libjanus carrier sensing background power */
+    /** reservation or scheduled repeat received, valid if reserved_to > reserved_from */
+    double reserved_from;
+    double reserved_to; /**< end of the reserved interval */
+  };
+
+  /** Listener of the channel events, called from the demodulation thread */
+  typedef std::function<void(const ChannelEvent&)> ChannelListener;
 
   /**
   * Class constructor.
@@ -60,6 +80,27 @@ public:
   * @return bool with value equal to the result of the function.
   */
   bool modulate(std::shared_ptr<Chunk> chunk);
+
+  /**
+  * Function used to recognize an emergency message (ANEP-87 §2.2-3): the
+  * user payload starts with "SOS" followed by a blank or nothing. The prefix
+  * and the following blanks are removed ("SOS" alone is kept).
+  *
+  * @param chunk user payload, without SuM MAC header.
+  * @return bool true if it is an emergency message.
+  */
+  static bool emergency(std::shared_ptr<Chunk> chunk);
+
+  /**
+  * Function used to modulate an emergency position, class 0 / app type 1
+  * (ANEP-87 Annex D 000-01, needs libplugin_000_01.so). The payload is
+  * "lat lon [depth [speed [heading [nationality]]]]": degrees, m, kn,
+  * degrees, two letters; "-" means not available.
+  *
+  * @param chunk payload after the "SOS" prefix.
+  * @return bool false if the payload is not a position (or out of range).
+  */
+  bool modulatePosition(std::shared_ptr<Chunk> chunk);
 
   /**
   * Function used to demodulate a vector struct of samples.
@@ -229,6 +270,31 @@ public:
   bool setDetectionThreshold(double threshold);
 
   /**
+  * Function used to receive the channel state (carrier sensing, received
+  * reservations). Call before janusSetup(). The listener must not block.
+  *
+  * @param listener called from the demodulation thread.
+  */
+  void setChannelListener(ChannelListener listener);
+
+  /**
+  * Function used to get the chip duration of the configured band
+  * (same formula as janus pset.c).
+  *
+  * @return chip duration in seconds.
+  */
+  double chipDuration() const;
+
+  /**
+  * Function used to get the duration of a packet from its detection:
+  * preamble, baseline packet and cargo.
+  *
+  * @param cargo_size cargo size in bytes
+  * @return duration in seconds.
+  */
+  double packetDuration(unsigned int cargo_size) const;
+
+  /**
   * Function used to create all the required janus objects.
   *
   * @return bool false if setup fails, e.g. no plugin for (class ID, app type).
@@ -248,6 +314,15 @@ public:
   /** Broadcast Destination Identifier (class 11) */
   static const int BROADCAST_ID;
 
+  /** Class user ID of the emergency messages (ANEP-87 Annex A) */
+  static const int EMERGENCY_CLASS_ID;
+
+  /** Application type Emergency Position (ANEP-87 Annex D 000-01) */
+  static const int POSITION_APP_TYPE;
+
+  /** Prefix of the emergency messages from the user */
+  static const char EMERGENCY_PREFIX[];
+
 private:
 
   /**
@@ -257,6 +332,15 @@ private:
   * @return bool true if the plugin is available.
   */
   bool checkCodec();
+
+  /**
+  * function used to modulate a packet ready to be transmitted.
+  *
+  * @param packet janus packet, freed by this function
+  * @param chunk chunk receiving the modulated samples
+  * @return bool true if the samples are ready.
+  */
+  bool modulatePacket(janus_packet_t packet, std::shared_ptr<Chunk> chunk);
 
   /**
   * function used to fill a janus packet ready to be transmitted: baseline
@@ -286,23 +370,6 @@ private:
   * @return bool true for class 11.
   */
   bool isTextClass() const;
-
-  /**
-  * function used to compute the chip duration of the configured band
-  * (same formula as janus pset.c).
-  *
-  * @return chip duration in seconds.
-  */
-  double chipDuration() const;
-
-  /**
-  * function used to compute the duration of a packet from its detection:
-  * preamble, baseline packet and cargo.
-  *
-  * @param cargo_size cargo size in bytes
-  * @return duration in seconds.
-  */
-  double packetDuration(unsigned int cargo_size) const;
 
   /**
   * function used to compute an upper bound of the TX samples of a packet,
@@ -337,6 +404,15 @@ private:
   */
   void performDemodulation();
 
+  /**
+  * function used to send the channel state of a received packet: busy, and
+  * its reservation or scheduled repeat if any.
+  *
+  * @param packet received packet
+  * @param time receiver time of the end of the packet
+  */
+  void notifyPacket(janus_packet_t packet, double time);
+
   janus_parameters_t params; /**< Janus parameters*/
 
   janus_simple_tx_t simple_tx; /**< Janus transmitter */
@@ -355,6 +431,10 @@ private:
   std::condition_variable cv_demod; 
 
   int demod_data_available; /**< boolean data samples inserted*/
+
+  unsigned long long samples_in; /**< samples given to the demodulator */
+
+  ChannelListener channel_listener; /**< receiver of the channel state */
 
   float carrier_freq; /**< Carrier frequency for framegenerator, in Hz */
 

@@ -23,6 +23,11 @@
 #include <janus/dump.h>
 #include <iostream>
 #include <string>
+#include <sstream>
+#include <vector>
+#include <map>
+#include <algorithm>
+#include <cctype>
 
 #define STATION_ID_LABEL "StationIdentifier"
 #define PSET_ID_LABEL "ParameterSetIdentifier"
@@ -31,6 +36,10 @@
 #define ENCRYPTION_LABEL "Encryption"
 #define PAYLOAD_SIZE_LABEL "Payload Size"
 #define PAYLOAD_LABEL "Payload"
+// class 0 / app type 1, Emergency Position (plugin_000_01)
+static const char* const POSITION_LABELS[] = {"Latitude", "Longitude",
+  "Depth", "Speed", "Heading", "Nationality"};
+static const unsigned int POSITION_FIELDS = 6;
 
 const unsigned int JanusWrapper::JANUS_RED_SIZE = 1024;
 const unsigned int JanusWrapper::MAX_CARGO_SIZE = 480;
@@ -38,6 +47,9 @@ const double JanusWrapper::TX_MARGIN = 0.5;
 const unsigned int JanusWrapper::RX_METADATA_SIZE = 7;
 const int JanusWrapper::TEXT_CLASS_ID = 11;
 const int JanusWrapper::BROADCAST_ID = 255;
+const int JanusWrapper::EMERGENCY_CLASS_ID = 0;
+const int JanusWrapper::POSITION_APP_TYPE = 1;
+const char JanusWrapper::EMERGENCY_PREFIX[] = "SOS";
 
 JanusWrapper::JanusWrapper()
 :
@@ -53,6 +65,8 @@ JanusWrapper::JanusWrapper()
   mutex_demod(),
   cv_demod(),
   demod_data_available(0),
+  samples_in(0),
+  channel_listener(),
   mac_mode(0),
   mobility(0),
   tx_rx(1),
@@ -426,6 +440,12 @@ JanusWrapper::setRxMetadata(bool enable)
   rx_metadata = enable;
 }
 
+void
+JanusWrapper::setChannelListener(ChannelListener listener)
+{
+  channel_listener = listener;
+}
+
 bool
 JanusWrapper::setDetectionThreshold(double threshold)
 {
@@ -485,6 +505,85 @@ JanusWrapper::modulate(std::shared_ptr<Chunk> chunk)
     janus_packet_free(packet);
     return false;
   }
+  return modulatePacket(packet, chunk);
+}
+
+bool
+JanusWrapper::emergency(std::shared_ptr<Chunk> chunk)
+{
+  const size_t len = sizeof(EMERGENCY_PREFIX) - 1;
+  const char* data = chunk->data();
+  size_t size = chunk->getSize();
+  if(size < len || memcmp(data, EMERGENCY_PREFIX, len) != 0
+    || (size > len && !isspace((unsigned char)data[len]))) {
+    return false;
+  }
+  size_t skip = len;
+  while(skip < size && isspace((unsigned char)data[skip])) {
+    ++skip;
+  }
+  // "SOS" alone is sent as it is: an empty payload cannot be sent
+  if(skip < size) {
+    memmove(chunk->data(), data + skip, size - skip);
+    chunk->setSize(size - skip);
+  }
+  return true;
+}
+
+bool
+JanusWrapper::modulatePosition(std::shared_ptr<Chunk> chunk)
+{
+  // lat lon [depth [speed [heading [nationality]]]], "-" = not available
+  std::istringstream in(std::string(chunk->data(), chunk->getSize()));
+  std::vector<std::string> tokens;
+  std::string token;
+  while(in >> token) {
+    tokens.push_back(token);
+  }
+  if(tokens.size() < 2 || tokens.size() > POSITION_FIELDS) {
+    return false;
+  }
+  for(size_t i = 0; i < tokens.size(); ++i) {
+    char* end = nullptr;
+    bool number = (strtod(tokens[i].c_str(), &end), *end == 0);
+    bool optional = i >= 2 && tokens[i] == "-";
+    bool nationality = i == 5 && tokens[i].size() == 2
+      && isalpha((unsigned char)tokens[i][0]) && isalpha((unsigned char)tokens[i][1]);
+    if(!(optional || (i < 5 && number) || nationality)) {
+      return false;
+    }
+  }
+  janus_packet_t packet = janus_packet_new(params->verbose);
+  initPacket(packet);
+  janus_packet_set_class_id(packet, EMERGENCY_CLASS_ID);
+  janus_packet_set_app_type(packet, POSITION_APP_TYPE);
+  janus_app_fields_t fields = janus_app_fields_new();
+  janus_app_fields_add_field(fields, STATION_ID_LABEL,
+    std::to_string(station_id).c_str());
+  janus_app_fields_add_field(fields, DEST_ID_LABEL,
+    std::to_string(dest_id).c_str());
+  for(size_t i = 0; i < tokens.size(); ++i) {
+    if(tokens[i] != "-") {
+      janus_app_fields_add_field(fields, POSITION_LABELS[i], tokens[i].c_str());
+    }
+  }
+  janus_packet_set_application_data_fields(packet, fields);
+  // the plugin builds the 14-byte cargo; Annex D 000-01 needs a reservation
+  // covering it
+  bool ok = janus_packet_encode_cargo(packet) == 0
+    && setReservation(packet, janus_packet_get_desired_cargo_size(packet))
+    && janus_packet_encode_application_data(packet) == 0;
+  janus_app_fields_free(fields);
+  if(!ok) {
+    janus_packet_free(packet);
+    return false;
+  }
+  return modulatePacket(packet, chunk);
+}
+
+bool
+JanusWrapper::modulatePacket(janus_packet_t packet, std::shared_ptr<Chunk> chunk)
+{
   janus_packet_set_validity(packet, 2);
   if(janus_simple_tx_execute(simple_tx, packet, state_tx) < 0) {
     janus_packet_free(packet);
@@ -534,6 +633,7 @@ JanusWrapper::demodulate(std::shared_ptr<Samples> samples)
   std::unique_lock<std::mutex> lk(mutex_demod);
   istream->write(istream,samples->samples.data(),samples->sample_size);
   demod_data_available += samples->sample_size;
+  samples_in += samples->sample_size / params->stream_channel_count;
   if(demod_data_available >= 10) {
     cv_demod.notify_one();
   }
@@ -541,11 +641,38 @@ JanusWrapper::demodulate(std::shared_ptr<Samples> samples)
   return true;
 }
 
+void
+JanusWrapper::notifyPacket(janus_packet_t packet, double time)
+{
+  if(!channel_listener) {
+    return;
+  }
+  ChannelEvent ev = {time, true, 0, 0, 0, 0};
+  janus_uint8_t flag = 2;
+  double interval = janus_packet_get_validity(packet)
+    ? janus_packet_get_tx_interval(packet, &flag) : 0.0;
+  if(interval > 0) {
+    // both intervals count from the packet detection (ANEP-87 Annex B)
+    double duration = packetDuration(janus_packet_get_cargo_size(packet));
+    double start = time - duration;
+    if(flag == 0) { // RPT flag 0: reservation time (packet.c, not exported)
+      ev.reserved_from = start;
+      ev.reserved_to = start + interval;
+    } else {
+      // scheduled repeat: the same packet again after the interval
+      ev.reserved_from = start + interval;
+      ev.reserved_to = start + interval + duration;
+    }
+  }
+  channel_listener(ev);
+}
+
 void JanusWrapper::performDemodulation()
 {
   unsigned queried_detection_time = 0;
   janus_packet_t packet_rx = janus_packet_new(params->verbose);
   janus_real_t time;
+  double last_cs_time = -1;
   initPacket(packet_rx);
 
   while(active.load()) {
@@ -569,7 +696,10 @@ void JanusWrapper::performDemodulation()
       if(demod_data_available < 0) {
         demod_data_available = 0;
       }
+      double rx_time = (samples_in - demod_data_available
+        / params->stream_channel_count) / (double)params->stream_fs;
       lck.unlock();
+      notifyPacket(packet_rx, rx_time);
 
       if (janus_packet_get_validity(packet_rx) &&
             janus_packet_get_cargo_error(packet_rx) == 0)
@@ -580,11 +710,15 @@ void JanusWrapper::performDemodulation()
         int rx_station_id = -1;
         int rx_pset_id = -1;
         int rx_dest_id = -1;
+        std::map<std::string, std::string> position;
         janus_app_fields_t fields = janus_app_fields_new();
         janus_packet_get_application_data_fields(packet_rx, fields);
         for(int i = 0; i < fields->field_count; ++i) {
           if(strcmp(fields->fields[i].name, STATION_ID_LABEL) == 0) {
             rx_station_id = atoi(fields->fields[i].value);
+          } else if(std::find(POSITION_LABELS, POSITION_LABELS + POSITION_FIELDS,
+              std::string(fields->fields[i].name)) != POSITION_LABELS + POSITION_FIELDS) {
+            position[fields->fields[i].name] = fields->fields[i].value;
           } else if(strcmp(fields->fields[i].name, PSET_ID_LABEL) == 0) {
             rx_pset_id = atoi(fields->fields[i].value);
           } else if(strcmp(fields->fields[i].name, DEST_ID_LABEL) == 0) {
@@ -599,9 +733,22 @@ void JanusWrapper::performDemodulation()
         }
         janus_app_fields_free(fields);
 
+        // emergency positions are always delivered, whatever the filters
+        bool emergency_rx = rx_class_id == EMERGENCY_CLASS_ID
+          && rx_app_type == POSITION_APP_TYPE && position.count("Latitude");
+        std::string sos;
+        if(emergency_rx) {
+          // same syntax as the TX: SOS lat lon depth speed heading nationality
+          sos = EMERGENCY_PREFIX;
+          for(unsigned int i = 0; i < POSITION_FIELDS; ++i) {
+            auto it = position.find(POSITION_LABELS[i]);
+            sos += " " + (it == position.end() ? std::string("-") : it->second);
+          }
+          _payload_len = sos.size();
+        }
         bool accepted = 
-          (filter_class_id < 0 || filter_class_id == rx_class_id) &&
-          (filter_app_type < 0 || filter_app_type == rx_app_type) &&
+          (emergency_rx || filter_class_id < 0 || filter_class_id == rx_class_id) &&
+          (emergency_rx || filter_app_type < 0 || filter_app_type == rx_app_type) &&
           !(self_filter && rx_station_id == station_id) &&
           (rx_dest_id < 0 || rx_dest_id == BROADCAST_ID 
             || rx_dest_id == station_id) &&
@@ -632,7 +779,19 @@ void JanusWrapper::performDemodulation()
             | ((janus_packet_get_forward(packet_rx) & 1) << 2));
         }
 	std::shared_ptr<Chunk> rx_chunk = std::make_shared<Chunk>(_payload_len + md_size);
-        if(accepted && rx_chunk->getSize() <= _payload_len) {
+        if(accepted && emergency_rx) {
+          memcpy(rx_chunk->data(), md, md_size);
+          memcpy(rx_chunk->data() + md_size, sos.data(), sos.size());
+          rx_chunk->setSize(md_size + sos.size());
+          if(mac_mode) {
+            // no SuM header on air: the destination is in the ADB
+            MacHdr hdr = {};
+            hdr.src_addr = rx_station_id & 0xF;
+            hdr.dest_addr = BROADCAST_ADDRESS;
+            rx_chunk->addHeader(&hdr, sizeof(hdr));
+          }
+          pushRxChunk(rx_chunk);
+        } else if(accepted && rx_chunk->getSize() <= _payload_len) {
           memcpy(rx_chunk->data(), md, md_size);
           if(mac_mode){
             // Ensure payload has at least 1 byte of application data (excluding MAC header).
@@ -670,16 +829,26 @@ void JanusWrapper::performDemodulation()
       if(demod_data_available < 0) {        
         demod_data_available = 0;
       }
+      double rx_time = (samples_in - demod_data_available
+        / params->stream_channel_count) / (double)params->stream_fs;
       lck.unlock();
-      if(janus_simple_rx_has_detected(simple_rx) 
-        && !queried_detection_time)
+      bool detected = janus_simple_rx_has_detected(simple_rx);
+      if(detected && !queried_detection_time)
       {
         queried_detection_time = 1;
       }
-      if (janus_carrier_sensing_execute(carrier_sensing, &time) > 0) {
-        janus_carrier_sensing_window_power(carrier_sensing);
-        janus_carrier_sensing_background_power(carrier_sensing);
+      // libjanus GA detector: > 0 busy window, < 0 window not full yet
+      // (startup, after a packet), 0 clear; it is not run while a packet
+      // is being decoded, which counts as busy
+      int cs = janus_carrier_sensing_execute(carrier_sensing, &time);
+      double cs_time = janus_carrier_sensing_time(carrier_sensing);
+      if(channel_listener && (detected || cs != 0 || cs_time != last_cs_time)) {
+        ChannelEvent ev = {rx_time, detected || cs != 0,
+          janus_carrier_sensing_window_power(carrier_sensing),
+          janus_carrier_sensing_background_power(carrier_sensing), 0, 0};
+        channel_listener(ev);
       }
+      last_cs_time = cs_time;
     }
   }
   janus_packet_free(packet_rx);

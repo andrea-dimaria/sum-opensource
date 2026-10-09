@@ -22,7 +22,7 @@ AM_CXXFLAGS = @SUMDEMO_CXXFLAGS@
 
 lib_LTLIBRARIES = libjanus_wrap.la
 
-libjanus_wrap_la_SOURCES = janus-wrapper.cpp
+libjanus_wrap_la_SOURCES = janus-wrapper.cpp janus-mac.cpp
 libjanus_wrap_la_CPPFLAGS = @SUMDEMO_CPPFLAGS@  
 libjanus_wrap_la_LDFLAGS = @SUMDEMO_LDFLAGS@ 
 libjanus_wrap_la_LIBADD = @SUMDEMO_LIBADD@ @JANUS_LDADD@ @ALSA_LDADD@

@@ -20,6 +20,7 @@
 #include "tcp-stream.h"
 #include "alsastream.h"
 #include "janus-wrapper.h"
+#include "janus-mac.h"
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -34,6 +35,9 @@
 #include <gpio.h>
 #include <signal.h>
 #include <getopt.h>
+#include <mutex>
+#include <condition_variable>
+#include <random>
 
 /** maximum absolute gain for amp output (hw-dependent) */
 const float MAX_ABS_GAIN = 0.38;
@@ -54,6 +58,14 @@ std::shared_ptr<ConcBuffer> rx_buffer = std::make_shared<ConcBuffer>(); /**< buf
  */
 std::atomic<bool> transmitting{false}; 
 
+/** ANEP-87 MAC (CSMA/GA + BEB) before each non emergency transmission */
+bool csma_enabled{true};
+unsigned int verbose_level{0}; /**< verbose level, for the MAC logs */
+std::unique_ptr<JanusMac> mac; /**< MAC state, used with mac_mutex */
+std::mutex mac_mutex; /**< protects mac */
+std::condition_variable mac_cv; /**< new channel state for txLoop */
+bool channel_busy{false}; /**< last channel state, for the logs */
+
 TcpStream server{SOCKPORT}; /**< socket used to exchange data with the users */
 std::shared_ptr<AlsaStream> astream = nullptr; /**< Alsa object handler */
 JanusWrapper janus; /**< Janus modulator/demodulator */
@@ -68,20 +80,101 @@ MacHdr my_hdr; /**< hdr with source and destination mac */
  * packet if it is received  back due to reflection or due to the loopback 
  * of the audio interface. 
  */
+/**
+ * channel state from the demodulator thread, given to the MAC
+ */
+void onChannel(const JanusWrapper::ChannelEvent& ev)
+{
+  {
+    std::lock_guard<std::mutex> lk(mac_mutex);
+    if(ev.reserved_to > ev.reserved_from) {
+      mac->reserve(ev.reserved_from, ev.reserved_to);
+      if(verbose_level > 0) {
+        std::cout << "MAC: channel reserved from " << ev.reserved_from
+          << " s to " << ev.reserved_to << " s" << std::endl;
+      }
+    }
+    mac->observe(ev.time, ev.busy);
+    if(verbose_level > 1 && ev.busy != channel_busy) {
+      std::cout << "MAC: " << ev.time << " s channel "
+        << (ev.busy ? "busy" : "clear") << " window_power = " << ev.window_power
+        << " background_power = " << ev.background_power << std::endl;
+    }
+    channel_busy = ev.busy;
+  }
+  mac_cv.notify_one();
+}
+
+/**
+ * wait for the MAC to allow the transmission of a non emergency packet
+ * @return true to transmit, false if the packet is dropped or on exit
+ */
+bool waitChannel()
+{
+  std::unique_lock<std::mutex> lk(mac_mutex);
+  mac->request();
+  double start = mac->now();
+  while(!exit_tx_rx.load()) {
+    JanusMac::Decision d = mac->decision();
+    if(d == JanusMac::TRANSMIT) {
+      if(verbose_level > 0) {
+        std::cout << "MAC: transmit after " << mac->now() - start
+          << " s, C = " << mac->counter() << std::endl;
+      }
+      return true;
+    }
+    if(d == JanusMac::DROP) {
+      std::cout << "MAC: channel busy in " << JanusMac::MAX_COUNTER - 1
+        << " backoff slots, packet dropped after " << mac->now() - start
+        << " s" << std::endl;
+      mac->cancel();
+      return false;
+    }
+    // the timeout only checks the exit flag
+    mac_cv.wait_for(lk, std::chrono::milliseconds(100));
+  }
+  mac->cancel();
+  return false;
+}
+
+/**
+ * transmission loop, where data received from the user via socket
+ * is modulated with JANUS and transmitted via soundcard.
+ * A payload starting with "SOS" is an emergency: it skips the MAC and, if
+ * it is a position, it is sent as class 0 / app type 1 (Emergency Position)
+ */
 void txLoop()
 {
   while(!exit_tx_rx.load()) {
     std::shared_ptr<Chunk> tx_chunk = std::make_shared<Chunk>(100);
     if(server.rx(tx_chunk)) {
-      gpio.txrxSwitch(true);
-      if(mac_enabled) {
-        tx_chunk->addHeader(&my_hdr,sizeof(my_hdr));
+      bool emergency = JanusWrapper::emergency(tx_chunk);
+      // modulate first, so that the packet leaves as soon as the MAC allows
+      bool ready = emergency && janus.modulatePosition(tx_chunk);
+      if(!ready) {
+        if(mac_enabled) {
+          tx_chunk->addHeader(&my_hdr,sizeof(my_hdr));
+        }
+        ready = janus.modulate(tx_chunk);
       }
+      if(!ready) {
+        std::cout << "JANUS TX: modulation failed, packet discarded" << std::endl;
+        continue;
+      }
+      if(emergency) {
+        std::cout << "JANUS TX: emergency message, MAC skipped" << std::endl;
+      } else if(csma_enabled && !waitChannel()) {
+        continue;
+      }
+      gpio.txrxSwitch(true);
       transmitting.store(true);
-      janus.modulate(tx_chunk);
       astream->transmit(tx_chunk->getModulatedSamples()->samples);
       gpio.txrxSwitch(false);//to check
       transmitting.store(false);
+      if(csma_enabled) {
+        std::lock_guard<std::mutex> lk(mac_mutex);
+        mac->transmitted();
+      }
     } 
   }
 }
@@ -135,9 +228,17 @@ void printHelp() {
   std::cout << "  --rx-metadata 0|1    prefix each received payload with 7 bytes (default: 0):" << std::endl;
   std::cout << "                       station_id u8 | dest_id u8 | pset_id u16 BE | class_id u8 | app_type u8 |" << std::endl;
   std::cout << "                       flags u8 (bit0 mobility, bit1 tx_rx, bit2 forward)" << std::endl;
+  std::cout << "  --csma 0|1           ANEP-87 MAC before each transmission (default: 1): sense the" << std::endl;
+  std::cout << "                       channel 352 chips, binary exponential backoff if busy, packet" << std::endl;
+  std::cout << "                       dropped (info log only) after 7 busy slots; 0 transmits at once" << std::endl;
   std::cout << "  --detection-threshold X  preamble detection threshold (default: 3.0, libjanus: 2.5);" << std::endl;
   std::cout << "                       higher gives fewer false detections, lower more range" << std::endl;
   std::cout << "  --help               print this help" << std::endl;
+  std::cout << "Emergency messages: a payload starting with \"SOS\" skips the MAC, \"SOS\" is removed." << std::endl;
+  std::cout << "  \"SOS lat lon [depth speed heading nationality]\" (deg, deg, m, kn, deg, two letters," << std::endl;
+  std::cout << "  \"-\" = not available) is sent as class 0 / app type 1 Emergency Position" << std::endl;
+  std::cout << "  (needs libplugin_000_01.so) and received in the same form; any other text is sent" << std::endl;
+  std::cout << "  as a normal message" << std::endl;
   std::cout << "Text messages (class 11, app type 2 Generic Text Chat, needs libplugin_011_02.so):" << std::endl;
   std::cout << "  text only (no 0x00 bytes), at most 478 bytes, station ID [0;254], MAC header not allowed" << std::endl;
   std::cout << "----------------------------------------------------------------" << std::endl;  
@@ -225,6 +326,7 @@ int parseArgs(int argc, char* argv[], Config& cfg)
       {"rx-app-filter", required_argument, nullptr, 'y'},
       {"rx-metadata", required_argument, nullptr, 'z'},
       {"detection-threshold", required_argument, nullptr, 'T'},
+      {"csma", required_argument, nullptr, 'Q'},
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0}
     };
@@ -253,6 +355,7 @@ int parseArgs(int argc, char* argv[], Config& cfg)
         case 'y': cfg.rx_app_filter = atoi(optarg); break;
         case 'z': cfg.rx_metadata = atoi(optarg); break;
         case 'T': cfg.detection_threshold = atof(optarg); break;
+        case 'Q': csma_enabled = atoi(optarg); break;
         case 'h': return 1;
         default: return -1;
       }
@@ -379,6 +482,7 @@ int main(int argc, char* argv[])
     << " rx_app_filter = " << cfg.rx_app_filter
     << " rx_metadata = " << cfg.rx_metadata
     << " detection_threshold = " << cfg.detection_threshold
+    << " csma = " << csma_enabled
     << std::endl;
 
   /**
@@ -429,6 +533,17 @@ int main(int argc, char* argv[])
    */
   janus.setRxBuffer(rx_buffer);
   janus.setVerbose(cfg.verbose);
+  verbose_level = cfg.verbose;
+  if(csma_enabled) {
+    bool ut_band = JanusMac::overlapsUtBand(cfg.center_frequency, cfg.bandwidth);
+    mac.reset(new JanusMac(janus.chipDuration(), ut_band, std::random_device{}()));
+    janus.setChannelListener(&onChannel);
+    std::cout << "MAC: CSMA/GA with BEB, chip " << janus.chipDuration() * 1000
+      << " ms, sensing " << JanusMac::SENSE_CHIPS * janus.chipDuration()
+      << " s, slot " << JanusMac::SLOT_CHIPS * janus.chipDuration() << " s"
+      << (ut_band ? ", band overlapping the underwater telephone" : "")
+      << std::endl;
+  }
   if(!janus.janusSetup()) {
     std::cerr << "ERROR: JANUS setup failed, unsupported class ID / app type" << std::endl;
     return -1;
