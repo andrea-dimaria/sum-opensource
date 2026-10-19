@@ -123,24 +123,26 @@ public:
   * Function used to set the carrier frequency
   *
   * @param carr_freq float of the carrier frequency, in Hz.
-  * @return bool true if set is successful.
+  * @return bool true if set is successful (false, unchanged, if not positive).
   */
   bool setCarrierFrequency(float carr_freq);
 
   /**
   * Function used to set the bandwidth.
   *
-  * @param carr_freq float of the bandwidth in Hz.
-  * @return bool true if set is successful.
+  * @param bw float of the bandwidth in Hz.
+  * @return bool true if set is successful (false, unchanged, unless
+  *   0 < bw <= the carrier frequency: set the carrier frequency first).
   */
   bool setBandwidth(float bw);
 
   /**
   * Function used to set the sampling frequency.
   *
-  * @param samples_per_symbol_ int of the sampling frequency.
+  * @param sampling_frequency_ int of the sampling frequency, in Hz.
+  * @return bool false (unchanged) if not positive.
   */
-  void setSamplingFrequency(int sampling_frequency_);
+  bool setSamplingFrequency(int sampling_frequency_);
 
   /**
   * Function used to set the tx_gain for transmission.

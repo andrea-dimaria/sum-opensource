@@ -513,6 +513,26 @@ int main(int argc, char* argv[])
   janus.setRxMetadata(cfg.rx_metadata);
 
   /**
+   * Frequencies and gain: refused instead of silently keeping libjanus's
+   * defaults while ALSA uses the argument
+   */
+  if(!janus.setSamplingFrequency(cfg.sampling_frequency)
+    || !janus.setCarrierFrequency(cfg.center_frequency)
+    || !janus.setBandwidth(cfg.bandwidth)
+    || cfg.center_frequency + cfg.bandwidth / 2.0 >= cfg.sampling_frequency / 2.0) {
+    std::cerr << "ERROR: invalid settings: fs " << cfg.sampling_frequency
+      << ", center frequency " << cfg.center_frequency << ", bandwidth " << cfg.bandwidth
+      << " (all > 0, bandwidth <= center frequency, center frequency + bandwidth / 2 < fs / 2)"
+      << std::endl;
+    return -1;
+  }
+  if(cfg.tx_gain < 0.0f || cfg.tx_gain > 1.0f
+    || !janus.setTxGain(cfg.tx_gain * MAX_ABS_GAIN)) {
+    std::cerr << "ERROR: gain " << cfg.tx_gain << " out of the [0;1] range" << std::endl;
+    return -1;
+  }
+
+  /**
    * Open Alsa
    */
   astream = std::make_shared<AlsaStream>("default", cfg.sampling_frequency);
@@ -521,14 +541,6 @@ int main(int argc, char* argv[])
   /**
    * Configure JANUS
    */
-  janus.setSamplingFrequency(cfg.sampling_frequency);
-  janus.setCarrierFrequency(cfg.center_frequency);
-  janus.setBandwidth(cfg.bandwidth);
-  if(cfg.tx_gain < 0.0f || cfg.tx_gain > 1.0f
-    || !janus.setTxGain(cfg.tx_gain * MAX_ABS_GAIN)) {
-    std::cerr << "ERROR: gain " << cfg.tx_gain << " out of the [0;1] range" << std::endl;
-    return -1;
-  }
   janus.setWakeUpTones(cfg.wake_up_tones);
   janus.setMacMode(mac_enabled);  
   /**

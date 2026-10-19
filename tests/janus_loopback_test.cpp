@@ -276,6 +276,19 @@ int main(int argc, char* argv[])
     check(!g.setTxGain(-0.1f) && !g.setTxGain(1.5f), "TX gain -0.1, 1.5 refused");
   }
 
+  // frequencies: invalid values refused, the previous ones kept
+  {
+    JanusWrapper w;
+    check(!w.setSamplingFrequency(0) && !w.setSamplingFrequency(-96000)
+      && w.setSamplingFrequency(fs), "fs 0, -96000 refused");
+    check(!w.setCarrierFrequency(0) && !w.setCarrierFrequency(-14080)
+      && w.setCarrierFrequency(14080), "center frequency 0, -14080 refused");
+    check(!w.setBandwidth(0) && !w.setBandwidth(20000) && w.setBandwidth(4160),
+      "bandwidth 0 and above the center frequency refused");
+    check(w.janusSetup() && std::fabs(w.chipDuration() - 1 / 160.0) < 1e-9,
+      "after refused values: band D (chip 6.25 ms)");
+  }
+
   // emergency messages
   {
     auto chunk = [](const std::string& m) {

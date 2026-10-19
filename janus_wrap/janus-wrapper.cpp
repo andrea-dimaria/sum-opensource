@@ -302,7 +302,7 @@ JanusWrapper::checkCodec()
 bool
 JanusWrapper::setCarrierFrequency(float carr_freq)
 {
-  if(carr_freq != 0.0) {
+  if(carr_freq > 0.0) {
     params->pset_center_freq = carr_freq;
     return true;
   }
@@ -456,12 +456,14 @@ JanusWrapper::setDetectionThreshold(double threshold)
   return true;
 }
 
-void
+bool
 JanusWrapper::setSamplingFrequency(int sampling_frequency_)
 {
-  if(sampling_frequency_ != 0.0) {
+  if(sampling_frequency_ > 0) {
     params->stream_fs = sampling_frequency_;
+    return true;
   }
+  return false;
 }
 
 
