@@ -248,6 +248,34 @@ int main(int argc, char* argv[])
     check(rxPacket(s16, a16, false) == nullptr, "class 16: own packet dropped");
   }
 
+  // TX gain: 0 transmits silence (it used to keep the default amplitude 0.95)
+  {
+    auto peak = [&](float gain, bool& ok) {
+      JanusWrapper tx;
+      config(tx, a16);
+      ok = tx.setTxGain(gain) && tx.janusSetup();
+      auto ck = std::make_shared<Chunk>(100);
+      memcpy(ck->data(), "hello", 5);
+      ck->setSize(5);
+      ok = ok && tx.modulate(ck) && ck->getModulatedSamples();
+      int p = 0;
+      if(ok) {
+        auto s = ck->getModulatedSamples();
+        for(size_t i = 0; i < s->sample_size; ++i) {
+          p = std::max(p, std::abs((int)s->samples[i]));
+        }
+      }
+      return p;
+    };
+    bool ok0, ok1, ok9;
+    int p0 = peak(0.0f, ok0), p1 = peak(0.1f, ok1), p9 = peak(0.95f, ok9);
+    check(ok0 && p0 == 0, "TX gain 0: packet of silence");
+    check(ok1 && ok9 && p1 > 0 && std::fabs(p9 / (double)p1 - 9.5) < 0.5,
+      "TX gain 0.1 / 0.95: peak in proportion");
+    JanusWrapper g;
+    check(!g.setTxGain(-0.1f) && !g.setTxGain(1.5f), "TX gain -0.1, 1.5 refused");
+  }
+
   // emergency messages
   {
     auto chunk = [](const std::string& m) {

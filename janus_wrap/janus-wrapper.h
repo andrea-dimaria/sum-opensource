@@ -145,9 +145,10 @@ public:
   /**
   * Function used to set the tx_gain for transmission.
   *
-  * @param gain float in range [0.0, 1.0].
+  * @param gain float in range [0.0, 1.0]; 0 transmits silence.
+  * @return bool false (gain unchanged) if out of range.
   */
-  void setTxGain(float gain);
+  bool setTxGain(float gain);
 
   /**
   * Function used to set the verbose janus parameter.

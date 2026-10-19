@@ -51,6 +51,7 @@ These tests check the JANUS changes (class 11 and class 0 plugins, ADB fields, R
   - `0x00` and 479-byte payloads are refused;
   - a 100-byte message gets through.
 - **Class 16 regression:** the output is identical to before the changes.
+- **TX gain:** gain 0 gives a packet of silence (it used to keep the default amplitude 0.95), gain 0.1 and 0.95 give peaks in proportion, gains outside [0, 1] are refused.
 - **Emergency messages:**
   - `SOS` prefix recognition and removal;
   - a position sent as class 0 / app type 1 and received as `SOS lat lon depth speed heading nationality`, also through a class filter;

@@ -476,13 +476,15 @@ JanusWrapper::setRxBuffer(std::shared_ptr<ConcBuffer> buffer)
   return true;
 }
 
-void
+bool
 JanusWrapper::setTxGain(float gain)
 {
-  if(gain > 0.0f && gain < 1.0f)
+  // gain 0 mutes: it used to be ignored, leaving libjanus's default amplitude 0.95
+  if(gain >= 0.0f && gain <= 1.0f) {
     params->stream_amp = JANUS_REAL_CONST(gain);
-  else
-    return;
+    return true;
+  }
+  return false;
 }
 
 void JanusWrapper::pushRxChunk(std::shared_ptr<Chunk> rx_chunk)

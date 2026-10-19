@@ -524,7 +524,11 @@ int main(int argc, char* argv[])
   janus.setSamplingFrequency(cfg.sampling_frequency);
   janus.setCarrierFrequency(cfg.center_frequency);
   janus.setBandwidth(cfg.bandwidth);
-  janus.setTxGain(cfg.tx_gain * MAX_ABS_GAIN);  
+  if(cfg.tx_gain < 0.0f || cfg.tx_gain > 1.0f
+    || !janus.setTxGain(cfg.tx_gain * MAX_ABS_GAIN)) {
+    std::cerr << "ERROR: gain " << cfg.tx_gain << " out of the [0;1] range" << std::endl;
+    return -1;
+  }
   janus.setWakeUpTones(cfg.wake_up_tones);
   janus.setMacMode(mac_enabled);  
   /**
